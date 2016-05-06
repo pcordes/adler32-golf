@@ -1,0 +1,12 @@
+adler32-golf
+adler32-x86-16
+test-adler32
+test-adler32-carry16
+test-adler32-i386
+test-adler32-x16
+test-adler32-amd64
+test-adler32-arm
+a.out
+arm-hello*
+foo*
+sample*
