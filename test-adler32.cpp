@@ -55,11 +55,14 @@ uint32_t adler32_carry16(const char *B, uint16_t len) {
 # define golfed_adler32(len, buf)   golfed_adler32_amd64(1234, buf, 5678, len)
 # define USE_ZLIB
 #elif  __i386__
+#  ifdef TEST_16BIT
  extern "C" uint32_t adler32_16wrapper  (uint16_t len /*cx*/, const char *buf /*ds:si*/);
+#    define golfed_adler32(len, buf)   adler32_16wrapper(len, buf)
+#  else
  extern "C" uint32_t adler32_i386wrapper(uint32_t len /*ecx*/, const char *buf /*esi*/);
-//# define golfed_adler32(len, buf)   adler32_16wrapper(len, buf)
-# define golfed_adler32(len, buf)   adler32_i386wrapper(len, buf)
-# define USE_ZLIB
+#    define golfed_adler32(len, buf)   adler32_i386wrapper(len, buf)
+#  endif
+#  define USE_ZLIB
 
 #elif  __arm__
  extern "C" unsigned adler32arm_golf(const char *buf, unsigned len);
