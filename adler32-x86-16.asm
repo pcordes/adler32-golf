@@ -10,14 +10,20 @@
 ;;; lodsb and loop will use the default operand size and address size
 ;;; This lets us test with 32bit pointers
 
-;; yasm -felf -Worphan-labels -gdwarf2 adler32-x86-16.asm -o adler32-x86-16+32.o && g++ -m32 -std=gnu++11 -O1 -g -Wall -Wextra -o test-adler32-x16  adler32-x86-16+32.o  test-adler32.cpp -lz && ./test-adler32-x16
+;; yasm -felf32 -Worphan-labels -gdwarf2 adler32-x86-16.asm -o adler32-x86-16+32.o && g++ -DTEST_16BIT -m32 -std=gnu++11 -O1 -g -Wall -Wextra -o test-adler32-x16  adler32-x86-16+32.o  test-adler32.cpp -lz && ./test-adler32-x16
 
-;bits 16	; assemble into an ELF object with bits 16 so we can use readelf to get symbol sizes.
+
+;; SIZEs: uncomment bits16 and run:
+;bits 16   ;  assemble into an ELF object with bits 16 so we can use readelf -s to get symbol sizes.
+;; yasm -felf32 -Worphan-labels -gdwarf2 adler32-x86-16.asm && readelf -s adler32-x86-16.o | grep '_v[0-9]*$'
+
 
 	;; idea:
 	;; if (low >= m) low -= m;
 	;;if (high >= 65536) high -= m;
 	;; high %= m; at the end.  (low is good from the loop)
+
+ADLER_MODULO equ 0xFFF1   ; 65521
 
 section .text
 CPU 386 intelnop	; we use setcc, so this won't run on 8086
@@ -37,7 +43,7 @@ adler32_16wrapper:
 
 	mov	ecx, [esp+16]
 	mov	esi, [esp+20]
-	call	adler32_x16_v7
+	call	adler32_x16_v5
 	shl	edx, 16
 	movzx	eax, ax
 	or	eax, edx	; mov  dx, ax /  mov eax, edx
@@ -61,7 +67,7 @@ adler32_x16_v3:   ; (const char *buf /*ds:si*/, uint16_t len /*cx*/)
         ;lea     di, [dx+1]	; di: low=1
 	mov	di, 1
 
-        mov     bx, 65521       ; bx = m = adler32 magic constant.
+        mov     bx, ADLER_MODULO       ; bx = m = adler32 magic constant.
 
 	;;  len=0 case unhandled
 .byteloop:
@@ -116,7 +122,7 @@ adler32_x16_v4:   ; (uint16_t len /*cx*/, const char *buf /*ds:si*/)
         cwd                     ; dx: high=0
 	mov	di, 1		; di: low=1
 
-        mov     bx, 65521       ; bx = m = adler32 magic constant.
+        mov     bx, ADLER_MODULO       ; bx = m = adler32 magic constant.
 	;;  len=0 case unhandled
 .byteloop:
         lodsb			; use native address-size
@@ -139,7 +145,7 @@ adler32_x16_v4:   ; (uint16_t len /*cx*/, const char *buf /*ds:si*/)
         loop   .byteloop
         ;; exit when ecx = 0, eax = last byte of buf
 
-	;; The 1040 times '?' test-case produces low = 65521 exactly.
+	;; The 1040 times '?' test-case produces low = ADLER_MODULO exactly.
 	cmp	di, bx
 	jb     .low_mod_m_done
 	sub	di, bx
@@ -173,9 +179,9 @@ adler32_x16_v5:   ; (uint16_t len /*cx*/, const char *buf /*ds:si*/)
         cwd                     ; dx: high=0
 ;	mov	di, 1		; di: low=1
 
-	lea     ebx, [word 65521]       ; bx = m = adler32 magic constant.
-	;; mov	ebx, 65521	; 1B longer than using lea to zero-extend a [disp16]
-	lea	edi, [bx + (65536 - 65521) + 1 ] ; low edi = 1 in 4 bytes, by wrapping a 16bit addressing mode.  bx instead of no reg so we can use a disp8 instead of disp16
+	lea     ebx, [word ADLER_MODULO]       ; bx = m = adler32 magic constant.
+	;; mov	ebx, ADLER_MODULO	; 1B longer than using lea to zero-extend a [disp16]
+	lea	edi, [bx + (65536 - ADLER_MODULO) + 1 ] ; low edi = 1 in 4 bytes, by wrapping a 16bit addressing mode.  bx instead of no reg so we can use a disp8 instead of disp16
 	;; xor	edi, edi
 	;; inc	di		; di: low=1
 
@@ -220,7 +226,7 @@ adler32_x16_v6:   ; (uint16_t len /*cx*/, const char *buf /*ds:si*/)
         cwd                     ; dx: high=0
 	mov	di, 1		; di: low=1
 
-        mov     bx, 65521       ; bx = m = adler32 magic constant.
+        mov     bx, ADLER_MODULO       ; bx = m = adler32 magic constant.
 	;;  len=0 case unhandled
 .byteloop:
         lodsb			; use native address-size
@@ -234,13 +240,10 @@ adler32_x16_v6:   ; (uint16_t len /*cx*/, const char *buf /*ds:si*/)
 .low_mod_m_done:
 
         add     dx, di		; high += low
-;	jnc	.nocarry_high	; handled with setc / div
-;	sub	dx, bx
-;.nocarry_high:
 	xchg	ax, dx
 	;; xor	dx,dx		; not needed: dx = old ax = 0x00XX  (garbage limited to low byte)
 	setc	dl   		; handle carry with setc to create the right 32bit dividend
-	;; sbb	dl,dl  		; 0 or -1, but we need 0 or 1
+	;; sbb	dx,dx  		; 0 or -1, but we need 0 or 1
 	div	bx		; high %= m (in dx).  ax = 0 or 1: high byte will always be zero.
 
         loop   .byteloop
@@ -265,7 +268,7 @@ adler32_x16_v7:   ; (uint16_t len /*cx*/, const char *buf /*ds:si*/)
         cwd                     ; dx: high=0
 	mov	di, 1		; di: low=1
 
-        mov     bx, 65521       ; bx = m = adler32 magic constant.
+        mov     bx, ADLER_MODULO       ; bx = m = adler32 magic constant.
 	;;  len=0 case unhandled
 .byteloop:
         lodsb			; use native address-size
