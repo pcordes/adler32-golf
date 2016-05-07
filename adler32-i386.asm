@@ -1,5 +1,6 @@
-;;; yasm -felf -Worphan-labels -gdwarf2 adler32-i386.asm  && g++ -m32 -std=gnu++11 -O1 -g -Wall -Wextra -o test-adler32-i386  adler32-i386.o  test-adler32.cpp -lz && ./test-adler32-i386
-;;;	&& objdump -Mintel -drw adler32-i386.o
+;;; yasm -felf32 -Worphan-labels -gdwarf2 adler32-i386.asm  && g++ -std=gnu++11 -m32 -O1 -g -Wall -Wextra -o test-adler32-i386  adler32-i386.o  test-adler32.cpp -lz && ./test-adler32-i386 && readelf -s ./adler32-i386.o | grep 'i386_v[0-9]*$'
+;;; readelf | grep shows function sizes, since we use  SIZE  directives to set ELF metadata
+;;; objdump -Mintel -drw adler32-i386.o
 
 CPU 686
 
@@ -23,7 +24,7 @@ adler32_i386wrapper:
 
 	mov	ecx, [esp+16]
 	mov	esi, [esp+20]
-	call	adler32_i386_v3
+	call	adler32_i386_v7
 
 	pop	edi
 	pop	esi
@@ -34,7 +35,6 @@ global adler32_i386_v1
 adler32_i386_v1:   ; (int dummy, const char *buf, int dummy, uint32_t len)
 
         ;; args: len in ecx,  const char *buf in esi
-        ;; Without dummy args, (unsigned len, const char *buf),  mov ecx, edi is the obvious solution, costing 2 bytes
 
         xor     eax,eax	        ; zero upper bytes for lodsb
         cdq                     ; edx: high=0
@@ -69,7 +69,6 @@ adler32_i386_v1:   ; (int dummy, const char *buf, int dummy, uint32_t len)
 ;       or      edx, edi
 ;       xchg    eax, edx        ; another 3B alternative:  xchg eax,edi / xchg ax,dx
 
-        ;; outside of 16bit code, we can't justify returning the result in the dx:ax register pair
         ;; If we give up on the standard calling convention altogether, we could save a byte by using edx as the return value
         ret
 adler32_i386_end_v1:
@@ -92,12 +91,11 @@ a32_mod: dd ADLER_MODULO
 ;;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 	;; push16 / push16 / pop32 to merge even more cheaply than amd64
 ALIGN 32
-	;; deferred modulo
+	;; deferred modulo means we can use div and just push the result, instead of setting up for next iter
 	; div instead of idiv to fault instead of returning wrong answers if high has overflowed to negative.  (-1234 % m is negative)
 adler32_i386_v3:   ; (int dummy, const char *buf, int dummy, uint32_t len)
 
         ;; args: len in ecx,  const char *buf in esi
-        ;; Without dummy args, (unsigned len, const char *buf),  mov ecx, edi is the obvious solution, costing 2 bytes
 
         xor     eax,eax         ; zero upper bytes for lodsb
         cdq                     ; edx: high=0
@@ -111,6 +109,7 @@ adler32_i386_v3:   ; (int dummy, const char *buf, int dummy, uint32_t len)
         ;; exit when ecx = 0, eax = last byte of buf
         ;; lodsb at this point would load the terminating 0 byte, conveniently leaving eax=0
 
+	;; doing modulo-reduction inside the loop takes an extra register, and requires getting results back into regs for the next iteration instead of just pushing
         mov     cx, ADLER_MODULO       ; ecx = m = adler32 magic constant.  (upper 16b of ecx is zero from the loop exit condition.  This saves 1B over mov r32,imm32)
         ;sub    cx, (65536 - ADLER_MODULO) ; the immediate is small enough to use the imm8 encoding.  No saving over mov, though, since this needs a mod/rm byte
 
@@ -129,7 +128,6 @@ adler32_i386_v3:   ; (int dummy, const char *buf, int dummy, uint32_t len)
         push    dx              ; push16 low%m
         pop     eax             ; pop32  high%m << 16 | low%m   (x86 is little-endian)
 
-        ;; outside of 16bit code, we can't justify returning the result in the dx:ax register pair
         ret
 adler32_i386_end_v3:
 size adler32_i386_v3 adler32_i386_end_v3 - adler32_i386_v3
@@ -144,7 +142,6 @@ ALIGN 32
 adler32_i386_v4:   ; (int dummy, const char *buf, int dummy, uint32_t len)
 
         ;; args: len in ecx,  const char *buf in esi
-        ;; Without dummy args, (unsigned len, const char *buf),  mov ecx, edi is the obvious solution, costing 2 bytes
 
         xor     eax,eax         ; zero upper bytes for lodsb
         cdq                     ; edx: high=0
@@ -152,7 +149,7 @@ adler32_i386_v4:   ; (int dummy, const char *buf, int dummy, uint32_t len)
 	push	1		; low on the stack
 
 	;; FIXME: requires edi=1, or some other reg that's valid in a 16b EA
-	lea     ebx, [di - 65536 + ADLER_MODULO - 1]  ; ebx = m = adler32 magic constant.
+	lea     ebx, [di-1 - 65536 + ADLER_MODULO - 1]  ; ebx = m = adler32 magic constant.
 	;mov	ebx, ADLER_MODULO
 .byteloop:
         lodsb
@@ -163,10 +160,10 @@ adler32_i386_v4:   ; (int dummy, const char *buf, int dummy, uint32_t len)
         cdq
         div     ebx             ; edx = high%m, already in the right place.  high bytes of eax=0
         loop   .byteloop
-        ;; exit when ecx = 0, eax = last byte of buf
+        ;; exit when ecx = 0
 	pop	eax
 
-        push    edx             ; push high%m and 2B of zero padding
+        push    dx             ; push high%m and 2B of zero padding
 
         cdq
         div     ebx             ; edx = low%m
@@ -175,20 +172,16 @@ adler32_i386_v4:   ; (int dummy, const char *buf, int dummy, uint32_t len)
         push    dx              ; push low%m with no padding
         pop     eax             ; pop  high%m << 16 | low%m   (x86 is little-endian)
 
-        pop     dx              ; add esp, 2 to restore the stack pointer
-
-        ;; outside of 16bit code, we can't justify returning the result in the dx:ax register pair
         ret
 adler32_i386_end_v4:
 size adler32_i386_v4  adler32_i386_end_v4 - adler32_i386_v4
-	;; - 2 : don't count push/pop
-
 
 
 
 
 ;;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-	;; do low modulo with cmp/sub
+	;; do low modulo inside the loop with cmp/sub
+	;; high modulo could be inside the loop with basically no change
 ALIGN 32
 adler32_i386_v5:   ; (int dummy, const char *buf, int dummy, uint32_t len)
         ;; args: len in ecx,  const char *buf in esi
@@ -203,10 +196,12 @@ adler32_i386_v5:   ; (int dummy, const char *buf, int dummy, uint32_t len)
 .byteloop:
         lodsb
         add     edi, eax        ; low += zero_extend(buf[i])
+
 	cmp	edi, ebx
 	jb     .low_mod_m_done
 	sub	edi, ebx
 .low_mod_m_done:
+
         add     edx, edi        ; high += low
         loop   .byteloop
         ;; exit when ecx = 0, eax = last byte of buf
@@ -215,24 +210,19 @@ adler32_i386_v5:   ; (int dummy, const char *buf, int dummy, uint32_t len)
         cdq                     ; could be removed if we could arrange things so the loop ended with a load of the 0 byte
 
         div     ebx
-	shl	edx,16
-	;;lea	eax, [edi + edx]
-	or	edx, edi
-	xchg	eax, edx
+	;; shl	edx,16
+	;; ;;lea	eax, [edi + edx]
+	;; or	edx, edi
+	;; xchg	eax, edx
 
-        ;; push    edx             ; push high%m and 2B of zero padding
+        ;; concatenate the two 16bit halves of the result by putting them in contiguous memory
+	push	dx
+        push    di              ; push low%m with no padding
+        pop     eax             ; pop  high%m << 16 | low%m   (x86 is little-endian)
 
-        ;; ;; concatenate the two 16bit halves of the result by putting them in contiguous memory
-        ;; push    di              ; push low%m with no padding
-        ;; pop     eax             ; pop  high%m << 16 | low%m   (x86 is little-endian)
-
-        ;; pop     di              ; add esp, 2 to restore the stack pointer
-
-        ;; outside of 16bit code, we can't justify returning the result in the dx:ax register pair
         ret
 adler32_i386_end_v5:
 size adler32_i386_v5 adler32_i386_end_v5 - adler32_i386_v5
-	;; -1B in 32bit mode
 
 
 ;;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
@@ -278,6 +268,7 @@ adler32_i386_v6:   ; (int dummy, const char *buf, int dummy, uint32_t len)
 	;; cdq
 	;; div	ebx		; eax = 0x000000XX,  edx = high%m
 	;; xchg	edx, [esp]	;; [esp] = high%m,  edx = low%m
+
         loop   .byteloop
         ;; exit when ecx = 0
 	;; [esp] = high, edx = low
@@ -296,6 +287,7 @@ size adler32_i386_v6 adler32_i386_end_v6 - adler32_i386_v6
 
 ;;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 	;; low in edx, high in edi
+	;; in-loop modulo
 ALIGN 32
 adler32_i386_v7:   ; (int dummy, const char *buf, int dummy, uint32_t len)
         ;; args: len in ecx,  const char *buf in esi
@@ -305,7 +297,7 @@ adler32_i386_v7:   ; (int dummy, const char *buf, int dummy, uint32_t len)
         xor	edi,edi		; edi: high=0
 
 				;jecxz  .end            ; handle len=0?  unlike rep, loop only checks ecx after decrementing
-	lea     ebx, [di-1 - 65536 + ADLER_MODULO]  ; ebx = m = adler32 magic constant.  4B
+	lea     ebx, [di-0 - 65536 + ADLER_MODULO]  ; ebx = m = adler32 magic constant.  4B
 
 .byteloop:
         lodsb
@@ -321,14 +313,14 @@ adler32_i386_v7:   ; (int dummy, const char *buf, int dummy, uint32_t len)
 	sub	edi, ebx
 .high_mod_m:
 
-	;; 10B  for  high+=low;  high%=m;
-	;; xchg	eax, edi
-        ;; add     eax, edx        ; eax = high + low
-	lea	eax, [edi+edx]
-	push	edx
-	cdq
-	div	ebx		; eax = 0x000000XX,  edx = high%m
-	;; xchg	edx, [esp]	;; [esp] = high%m,  edx = low%m
+	;; 8B  for  high+=low;  high%=m;
+	;; add	edi, edx
+	;; xchg	eax, edx
+	;; xchg	eax, edi	; save edx(low%m) in edi while we div
+	;; cdq			; in-loop modulo makes this safe
+	;; div	ebx		; eax = 0x000000XX,  edx = high%m
+	;; xchg	edi, edx
+
         loop   .byteloop
         ;; exit when ecx = 0
 
@@ -344,6 +336,89 @@ adler32_i386_v7:   ; (int dummy, const char *buf, int dummy, uint32_t len)
         ret
 adler32_i386_end_v7:
 size adler32_i386_v7 adler32_i386_end_v7 - adler32_i386_v7
+
+
+
+
+;;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; in-loop modulo to handle large inputs
+ALIGN 32
+adler32_i386_v8:   ; (int dummy, const char *buf, int dummy, uint32_t len)
+
+        ;; args: len in ecx,  const char *buf in esi
+
+        xor     eax,eax         ; zero upper bytes for lodsb
+        cdq                     ; edx: high=0
+	;; inc	edx
+	;; xor	edi,edi
+        lea     edi, [edx+1]    ; edi: low=1
+	lea     ebx, [di-1 - 65536 + ADLER_MODULO]  ; ebx = m = adler32 magic constant.  4B
+        ;jecxz  .end            ; handle len=0?  unlike rep, loop only checks ecx after decrementing
+.byteloop:
+        lodsb
+        add    	edi, eax
+	cmp	edi, ebx
+	jb     .low_mod_m_done
+	sub	edi, ebx
+.low_mod_m_done:
+
+	lea	eax, [edi + edx] ; eax = high+low
+        cdq
+        div     ebx		; eax = 0x00XX, edx = high%m
+
+        loop   .byteloop
+        ;; exit when ecx = 0, eax = last byte of buf
+
+        push    dx		; push16 high%m
+
+        ;; concatenate the two 16bit halves of the result by putting them in contiguous memory
+	;; 32bit trick: two 16b pushes => one 32b pop
+        push    di              ; push16 low%m
+        pop     eax             ; pop32  high%m << 16 | low%m   (x86 is little-endian)
+
+        ret
+adler32_i386_end_v8:
+size adler32_i386_v8 adler32_i386_end_v8 - adler32_i386_v8
+
+;;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	;; in-loop modulo for high
+	;; deferred modulo for low
+ALIGN 32
+adler32_i386_v9:   ; (int dummy, const char *buf, int dummy, uint32_t len)
+
+        ;; args: len in ecx,  const char *buf in esi
+
+        xor     eax,eax         ; zero upper bytes for lodsb
+        cdq                     ; edx: high=0
+        lea     edi, [edx+1]    ; edi: low=1
+	lea     ebx, [di-1 - 65536 + ADLER_MODULO]  ; ebx = m = adler32 magic constant.  4B
+        ;jecxz  .end            ; handle len=0?  unlike rep, loop only checks ecx after decrementing
+.byteloop:
+        lodsb
+        add    	edi, eax	 ; low += buf[i]
+	lea	eax, [edi + edx] ; eax = high+low
+        cdq
+        div     ebx		; eax = 0x00XX, edx = high%m
+
+        loop   .byteloop
+        ;; exit when ecx = 0
+
+        push    dx		; push16 high%m
+
+	;; 4B vs. cmp/jcc/sub in the loop = 6B
+	cdq			; high bytes of eax still zero from div in the loop
+	xchg	eax, edi
+	div	ebx
+
+        ;; concatenate the two 16bit halves of the result by putting them in contiguous memory
+	;; 32bit trick: two 16b pushes => one 32b pop
+        push    dx              ; push16 low%m
+        pop     eax             ; pop32  high%m << 16 | low%m   (x86 is little-endian)
+
+        ret
+adler32_i386_end_v9:
+size adler32_i386_v9 adler32_i386_end_v9 - adler32_i386_v9
+
 
 
 ;; ALIGN 32
