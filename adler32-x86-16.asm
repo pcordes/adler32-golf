@@ -16,7 +16,10 @@
 ;; SIZEs: uncomment bits16 and run:
 ;bits 16   ;  assemble into an ELF object with bits 16 so we can use readelf -s to get symbol sizes.
 ;; yasm -felf32 -Worphan-labels -gdwarf2 adler32-x86-16.asm && readelf -s adler32-x86-16.o | grep '_v[0-9]*$'
+;;; objdump -drw -Mintel -Maddr16,data16 adler32 adler32-x86-16.o
 
+;;; 16bit asm dump.  (no labels, so bits 16 into an ELF file is nicer)
+;; yasm -fbin adler32-x86-16.asm  && objdump -Mintel -Drw   -b binary -mi386 -Maddr16,data16 adler32-x86-16
 
 	;; idea:
 	;; if (low >= m) low -= m;
@@ -26,7 +29,7 @@
 ADLER_MODULO equ 0xFFF1   ; 65521
 
 section .text
-CPU 386 intelnop	; we use setcc, so this won't run on 8086
+CPU 386,undocumented intelnop	; we use setcc, so this won't run on 8086.  salc is undocumented
 
 
 	;; 32bit SysV / cdecl wrapper for calling 16bit functions (assembled for 32bit, and using lodsb which will assemble to the default address size)
@@ -43,7 +46,7 @@ adler32_16wrapper:
 
 	mov	ecx, [esp+16]
 	mov	esi, [esp+20]
-	call	adler32_x16_v5
+	call	adler32_x16_v8
 	shl	edx, 16
 	movzx	eax, ax
 	or	eax, edx	; mov  dx, ax /  mov eax, edx
@@ -201,8 +204,6 @@ adler32_x16_v5:   ; (uint16_t len /*cx*/, const char *buf /*ds:si*/)
 ;.nocarry_high:
 	xchg	ax, dx		; dx = 0x00XX  (garbage limited to low byte)
 	setc	dl   		; handle carry with setc to create the right 32bit dividend
-	;; sbb	dl,dl  		; 0 or -1, but we need 0 or 1
-	;; xor	dx,dx
 	div	bx		; high %= m (in dx).  ax = 0 or 1: high byte will always be zero.
 
         loop   .byteloop
@@ -240,10 +241,12 @@ adler32_x16_v6:   ; (uint16_t len /*cx*/, const char *buf /*ds:si*/)
 .low_mod_m_done:
 
         add     dx, di		; high += low
+	;; Store the carry=0 or 1 in ax, for a 32bit dividend (after xchg)
+	;; xor	ax,ax		; not needed: garbage limited to low byte
+	setc	al   		; handle carry with setc to create the right 32bit dividend
+	;; salc (undocumented) / neg al  ;  instead of sbb or setc
+	;; sbb	ax,ax  		; 0 or -1, but we need 0 or 1.  neg ax is another 2B, and  inc ax  emulates setnc
 	xchg	ax, dx
-	;; xor	dx,dx		; not needed: dx = old ax = 0x00XX  (garbage limited to low byte)
-	setc	dl   		; handle carry with setc to create the right 32bit dividend
-	;; sbb	dx,dx  		; 0 or -1, but we need 0 or 1
 	div	bx		; high %= m (in dx).  ax = 0 or 1: high byte will always be zero.
 
         loop   .byteloop
@@ -295,3 +298,47 @@ adler32_x16_v7:   ; (uint16_t len /*cx*/, const char *buf /*ds:si*/)
         ret
 adler32_x16_v7_end:
 size adler32_x16_v7 adler32_x16_v7_end - adler32_x16_v7
+
+
+;;; ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+	ALIGN 32
+	;; v6 but with low in dx, high in di.  This requires an extra xchg after the loop
+	;; sbb/neg is 4B, but we save an xchg, so no net savings inside the loop
+adler32_x16_v8:   ; (uint16_t len /*cx*/, const char *buf /*ds:si*/)
+	;; clobbers ax,cx,dx, bx,si,di
+
+        xor     ax,ax           ; zero upper half for lodsb
+        cwd                     ; dx: low=1
+	inc	dx
+	xor	di,di		; di: high=0
+
+        mov     bx, ADLER_MODULO       ; bx = m = adler32 magic constant.
+	;;  len=0 case unhandled
+.byteloop:
+        lodsb			; use native address-size
+
+        add     ax, dx		; high += low
+	;;setc	al   		; handle carry with setc to create the right 32bit dividend
+	;; xchg ax, dx
+	;; salc (undocumented) / neg al  ;  instead of sbb or setc
+	sbb	dx,dx  		; 0 or -1
+	neg	dx		; 0 or  1
+	div	bx		; high %= m (in dx).  ax = 0 or 1: high byte will always be zero.
+
+        add     di, dx		; high += low
+	jc	.carry_high
+	cmp	di, bx
+	jb     .high_mod_m_done
+.carry_high:
+	sub	di, bx
+.high_mod_m_done:
+
+        loop   .byteloop
+        ;; exit when ecx = 0, eax = last byte of buf
+
+	xchg    ax, di
+	xchg	dx, ax
+	;; dx:ax = result
+        ret
+adler32_x16_v8_end:
+size adler32_x16_v8 adler32_x16_v8_end - adler32_x16_v8
